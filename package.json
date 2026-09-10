@@ -1,0 +1,29 @@
+{
+  "name": "forma-ai",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Forma AI — AI-Augmented Dynamic Form Engine",
+  "scripts": {
+    "dev": "concurrently -n \"SERVER,CLIENT\" -c \"blue,green\" \"npm run dev:server\" \"npm run dev:client\"",
+    "dev:server": "npm run dev --prefix server",
+    "dev:client": "npm run dev --prefix client",
+    "build": "npm run build --prefix server && npm run build --prefix client",
+    "build:server": "npm run build --prefix server",
+    "build:client": "npm run build --prefix client",
+    "lint": "npm run lint --prefix server && npm run lint --prefix client",
+    "seed": "npm run seed --prefix server"
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.2"
+  },
+  "keywords": [
+    "dynamic-forms",
+    "ai",
+    "react",
+    "express",
+    "typescript",
+    "mongodb"
+  ],
+  "author": "",
+  "license": "MIT"
+}
