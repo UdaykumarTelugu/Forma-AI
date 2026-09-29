@@ -53,3 +53,6 @@ ehthumbs.db
 .turbo
 .parcel-cache
 .cache/
+
+# Local frontend backup - do not commit
+frontend_backup_before_redesign/

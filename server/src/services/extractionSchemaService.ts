@@ -32,13 +32,11 @@ export interface FormExtractionDefinition {
  */
 export class ExtractionSchemaService {
   /**
-   * Flattens and extracts relevant field metadata from FormSchema,
-   * stripping out internal database identifiers, timestamps, and conditional engine internals.
-   *
-   * @param schema Retrieved FormSchema document
-   * @returns FormExtractionDefinition
+   * Flattens and extracts relevant field metadata from FormSchema.
    */
-  public createExtractionDefinition(schema: FormSchema): FormExtractionDefinition {
+  public createExtractionDefinition(
+    schema: FormSchema
+  ): FormExtractionDefinition {
     const fieldMap: Record<string, ExtractionFieldDefinition> = {};
 
     const processField = (field: FormField) => {
@@ -86,11 +84,12 @@ export class ExtractionSchemaService {
   }
 
   /**
-   * Dynamically constructs a Zod schema matching the exact fields and allowed options
-   * defined in the FormExtractionDefinition.
+   * Dynamically constructs a Zod schema matching the exact fields
+   * and allowed options defined in the FormExtractionDefinition.
    *
-   * @param definition Schema extraction definition
-   * @returns Dynamic ZodObject schema for structured LLM parsing
+   * OpenAI Structured Outputs requires object properties to be required.
+   * Nullable fields allow the model to return null when information
+   * is not present.
    */
   public generateExtractionZodSchema(
     definition: FormExtractionDefinition
@@ -98,38 +97,42 @@ export class ExtractionSchemaService {
     const shape: Record<string, z.ZodTypeAny> = {};
 
     for (const [key, field] of Object.entries(definition.fields)) {
-      if (field.type === 'select' && field.allowedValues && field.allowedValues.length > 0) {
+      if (
+        field.type === 'select' &&
+        field.allowedValues &&
+        field.allowedValues.length > 0
+      ) {
         const [first, ...rest] = field.allowedValues;
+
         shape[key] = z
           .enum([first, ...rest], {
             description: `${field.label}. Must be one of: ${field.allowedValues.join(', ')}`,
           })
-          .optional();
+          .nullable();
       } else if (field.type === 'number') {
         shape[key] = z
           .number({
             description: `${field.label} as a numeric value`,
           })
-          .optional();
+          .nullable();
       } else if (field.type === 'checkbox') {
         shape[key] = z
           .boolean({
             description: `${field.label} as a boolean true/false`,
           })
-          .optional();
+          .nullable();
       } else if (field.type === 'date') {
         shape[key] = z
           .string({
             description: `${field.label} formatted as YYYY-MM-DD if determinable`,
           })
-          .optional();
+          .nullable();
       } else {
-        // text, textarea, or fallback
         shape[key] = z
           .string({
             description: `${field.label}`,
           })
-          .optional();
+          .nullable();
       }
     }
 
@@ -137,17 +140,20 @@ export class ExtractionSchemaService {
   }
 
   /**
-   * Generates a dynamic system prompt grounded in the current form schema's allowed fields.
-   *
-   * @param definition Schema extraction definition
-   * @returns Dynamic system prompt string
+   * Generates a dynamic system prompt grounded in the current form schema.
    */
-  public generateExtractionPrompt(definition: FormExtractionDefinition): string {
+  public generateExtractionPrompt(
+    definition: FormExtractionDefinition
+  ): string {
     const fieldLines = Object.values(definition.fields).map((field) => {
       let line = `- "${field.id}" (${field.label}, type: ${field.type})`;
+
       if (field.allowedValues && field.allowedValues.length > 0) {
-        line += ` -> Allowed values: [${field.allowedValues.map((v) => `"${v}"`).join(', ')}]`;
+        line += ` -> Allowed values: [${field.allowedValues
+          .map((v) => `"${v}"`)
+          .join(', ')}]`;
       }
+
       return line;
     });
 
@@ -159,14 +165,18 @@ ${fieldLines.join('\n')}
 
 STRICT EXTRACTION RULES:
 1. Fact-Grounded: Only extract facts directly supported by the text. NEVER guess, assume, or extrapolate unmentioned details.
-2. Missing Information: If a field is not mentioned, OMIT it. Missing information is normal and expected. Do NOT invent values.
-3. Select Options: For select fields, only return values that strictly match one of the allowed values listed above. If text does not match any allowed value, omit the field.
+2. Missing Information: If a field is not mentioned, return null.
+3. Select Options: For select fields, only return values that strictly match one of the allowed values listed above. If text does not match any allowed value, return null.
 4. Dates: Format dates as YYYY-MM-DD if explicitly mentioned or determinable. Do not invent dates.
-5. Numbers: Extract numbers (e.g. model years) as numeric values.
+5. Numbers: Extract numbers as numeric values.
 6. Schema Adherence: Only return facts for the allowed fields listed above. Do not introduce unsupported keys.
 7. Return strictly valid structured data adhering to the defined schema.`;
   }
 }
 
+/**
+ * Singleton instance of the extraction schema service.
+ */
 export const extractionSchemaService = new ExtractionSchemaService();
+
 export default extractionSchemaService;

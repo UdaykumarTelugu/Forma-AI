@@ -1,5 +1,6 @@
 import React from 'react';
 import { FormField } from '../../types/form';
+import { AlertCircleIcon } from '../common/Icons';
 
 export interface TextareaFieldProps {
   field: FormField;
@@ -14,13 +15,18 @@ export const TextareaField: React.FC<TextareaFieldProps> = ({
   onChange,
   error,
 }) => {
-  const isRequired = field.required || field.validation?.required;
+  const isRequired = Boolean(field.required || field.validation?.required);
+  const hasError = Boolean(error);
 
   return (
-    <div className="form-field textarea-field" id={`field-${field.id}`}>
+    <div className={`form-field textarea-field ${hasError ? 'field-has-error' : ''}`} id={`field-${field.id}`}>
       <label htmlFor={field.name}>
-        {field.label}
-        {isRequired && <span className="required-indicator" aria-hidden="true"> *</span>}
+        <span>{field.label}</span>
+        {isRequired && (
+          <span className="required-indicator" aria-hidden="true" title="Required field">
+            {' '}*
+          </span>
+        )}
       </label>
       <textarea
         id={field.name}
@@ -31,10 +37,22 @@ export const TextareaField: React.FC<TextareaFieldProps> = ({
         readOnly={field.readonly}
         required={isRequired}
         rows={4}
+        aria-invalid={hasError ? 'true' : undefined}
+        aria-describedby={hasError ? `error-${field.name}` : field.helpText ? `help-${field.name}` : undefined}
+        className={hasError ? 'input-error' : ''}
         onChange={(e) => onChange?.(e.target.value)}
       />
-      {field.helpText && <small className="field-help">{field.helpText}</small>}
-      {error && <span className="field-error" role="alert">{error}</span>}
+      {field.helpText && !hasError && (
+        <small className="field-help" id={`help-${field.name}`}>
+          {field.helpText}
+        </small>
+      )}
+      {error && (
+        <div className="field-error-message" id={`error-${field.name}`} role="alert">
+          <AlertCircleIcon size={13} color="#f87171" />
+          <span>{error}</span>
+        </div>
+      )}
     </div>
   );
 };

@@ -6,7 +6,9 @@ import {
   DraftListResult,
   DraftDeleteResult,
   DraftCompatibilityResult,
+  ApiResponse,
 } from '../types/form';
+import { apiClient } from './api';
 
 const STORAGE_INDEX_KEY = 'forma_ai_draft_index';
 const DRAFT_KEY_PREFIX = 'forma_ai_draft_';
@@ -21,7 +23,7 @@ const getStorageItem = (key: string): string | null => {
       return window.localStorage.getItem(key);
     }
   } catch {
-    // Access denied or quota error � fall through to in-memory store
+    // Access denied or quota error — fall through to in-memory store
   }
   return inMemoryStore[key] ?? null;
 };
@@ -65,6 +67,29 @@ const saveDraftIndex = (index: string[]): void => {
   const unique = Array.from(new Set(index));
   setStorageItem(STORAGE_INDEX_KEY, JSON.stringify(unique));
 };
+
+export const isValidMongoId = (id?: string): boolean => {
+  return typeof id === 'string' && /^[0-9a-fA-F]{24}$/.test(id.trim());
+};
+
+export interface BackendDoc {
+  _id?: string;
+  formId?: string;
+  formVersion?: number;
+  data?: Record<string, unknown>;
+  status?: string;
+  createdAt?: string;
+  updatedAt?: string;
+}
+
+const mapDocToDraft = (doc: BackendDoc): FormDraft => ({
+  draftId: String(doc._id || ''),
+  schemaId: String(doc.formId || ''),
+  schemaVersion: Number(doc.formVersion || 1),
+  values: (doc.data || {}) as FormValues,
+  createdAt: doc.createdAt ? new Date(doc.createdAt).toISOString() : new Date().toISOString(),
+  updatedAt: doc.updatedAt ? new Date(doc.updatedAt).toISOString() : new Date().toISOString(),
+});
 
 /**
  * Generates a stable, unique draft identifier.
@@ -117,20 +142,22 @@ export interface SaveDraftInput {
 }
 
 /**
- * Forma AI � Draft Persistence Service Abstraction
+ * Forma AI — Draft Persistence Service Abstraction (Week 4 Step 1)
  *
- * Provides a production-grade boundary between form UI and draft storage:
- * - draftApi.saveDraft(...)
- * - draftApi.getDraft(...)
- * - draftApi.listDrafts(...)
- * - draftApi.deleteDraft(...)
+ * Provides a backend-integrated boundary between form UI and draft storage:
+ * - draftApi.saveDraft(...)  -> PATCH /api/submissions/:id or POST /api/submissions
+ * - draftApi.getDraft(...)   -> GET /api/submissions/:id
+ * - draftApi.listDrafts(...) -> GET /api/submissions?status=draft
+ * - draftApi.deleteDraft(...) -> DELETE /api/submissions/:id
+ *
+ * Automatically falls back to local storage if the backend is unreachable.
  */
 export const draftApi = {
   /**
    * Saves a form draft.
-   * If draftId is provided and exists, updates the draft values and updatedAt
-   * while strictly preserving createdAt, schemaId, and schemaVersion.
-   * If draftId is new or omitted, generates a stable draftId and sets createdAt.
+   * If draftId is a valid MongoDB ID, updates the document on the backend (PATCH /api/submissions/:id).
+   * If draftId is omitted, creates a new draft on the backend (POST /api/submissions).
+   * In all cases, caches in local storage for instant offline availability.
    */
   async saveDraft(input: SaveDraftInput): Promise<DraftSaveResult> {
     try {
@@ -145,43 +172,82 @@ export const draftApi = {
         ? input.schemaVersion
         : parseInt(String(input.schemaVersion), 10) || 1;
 
-      const now = new Date().toISOString();
-      let draftId = input.draftId?.trim();
-      let createdAt = now;
+      const trimmedDraftId = input.draftId?.trim();
+      let draft: FormDraft | null = null;
 
-      // Check if updating an existing draft
-      if (draftId) {
-        const existingRaw = getStorageItem(`${DRAFT_KEY_PREFIX}${draftId}`);
-        if (existingRaw) {
-          try {
-            const existing = JSON.parse(existingRaw) as FormDraft;
-            if (existing.createdAt) {
-              createdAt = existing.createdAt;
-            }
-          } catch {
-            // Corrupt existing draft � will be overwritten with preserved/new createdAt
+      // 1. If valid MongoDB ID provided, attempt to update existing draft on backend (PATCH /api/submissions/:id)
+      if (isValidMongoId(trimmedDraftId)) {
+        try {
+          const res = await apiClient.patch<ApiResponse<BackendDoc>>(
+            `/submissions/${trimmedDraftId}`,
+            { data: input.values }
+          );
+          if (res.data?.success && res.data.data) {
+            draft = mapDocToDraft(res.data.data);
           }
+        } catch (apiErr: unknown) {
+          const errMsg = apiErr instanceof Error ? apiErr.message : String(apiErr);
+          // If the backend actively rejected with 400 (e.g. claim already submitted), fail immediately
+          if (errMsg.includes('already been submitted') || errMsg.includes('Only drafts')) {
+            return { success: false, error: errMsg };
+          }
+          // Otherwise network issue — proceed to fallback below
         }
-      } else {
-        draftId = generateDraftId();
+      } else if (!trimmedDraftId) {
+        // 2. If no draftId provided, create a new draft on backend (POST /api/submissions)
+        try {
+          const res = await apiClient.post<ApiResponse<BackendDoc>>(
+            '/submissions',
+            {
+              formId: input.schemaId,
+              formVersion: normalizedVersion,
+              data: input.values,
+              status: 'draft',
+            }
+          );
+          if (res.data?.success && res.data.data) {
+            draft = mapDocToDraft(res.data.data);
+          }
+        } catch {
+          // If creation fails due to server down, proceed to local fallback
+        }
       }
 
-      const draft: FormDraft = {
-        draftId,
-        schemaId: input.schemaId,
-        schemaVersion: normalizedVersion,
-        values: input.values,
-        createdAt,
-        updatedAt: now,
-      };
+      // 3. Fallback to local storage if backend call did not succeed
+      if (!draft) {
+        const now = new Date().toISOString();
+        let fallbackDraftId = trimmedDraftId;
+        let createdAt = now;
 
-      // Persist draft payload
-      setStorageItem(`${DRAFT_KEY_PREFIX}${draftId}`, JSON.stringify(draft));
+        if (fallbackDraftId) {
+          const existingRaw = getStorageItem(`${DRAFT_KEY_PREFIX}${fallbackDraftId}`);
+          if (existingRaw) {
+            try {
+              const existing = JSON.parse(existingRaw) as FormDraft;
+              if (existing.createdAt) createdAt = existing.createdAt;
+            } catch {
+              // Corrupt existing draft
+            }
+          }
+        } else {
+          fallbackDraftId = generateDraftId();
+        }
 
-      // Update index
+        draft = {
+          draftId: fallbackDraftId,
+          schemaId: input.schemaId,
+          schemaVersion: normalizedVersion,
+          values: input.values,
+          createdAt,
+          updatedAt: now,
+        };
+      }
+
+      // Persist to local storage and index for offline backup / instant UI responsiveness
+      setStorageItem(`${DRAFT_KEY_PREFIX}${draft.draftId}`, JSON.stringify(draft));
       const index = getDraftIndex();
-      if (!index.includes(draftId)) {
-        index.push(draftId);
+      if (!index.includes(draft.draftId)) {
+        index.push(draft.draftId);
         saveDraftIndex(index);
       }
 
@@ -197,7 +263,8 @@ export const draftApi = {
 
   /**
    * Retrieves a draft by draftId.
-   * Safely handles missing or corrupted drafts without throwing.
+   * If draftId is a valid MongoDB ID, attempts retrieval from backend first.
+   * Falls back to local storage if backend is unreachable or record is purely local.
    */
   async getDraft(draftId: string): Promise<DraftGetResult> {
     try {
@@ -205,9 +272,29 @@ export const draftApi = {
         return { success: false, error: 'Draft ID is required.' };
       }
 
-      const raw = getStorageItem(`${DRAFT_KEY_PREFIX}${draftId}`);
+      const trimmedId = draftId.trim();
+
+      // 1. If valid MongoDB ID, try fetching from backend
+      if (isValidMongoId(trimmedId)) {
+        try {
+          const res = await apiClient.get<ApiResponse<BackendDoc>>(`/submissions/${trimmedId}`);
+          if (res.data?.success && res.data.data) {
+            const draft = mapDocToDraft(res.data.data);
+            setStorageItem(`${DRAFT_KEY_PREFIX}${draft.draftId}`, JSON.stringify(draft));
+            return {
+              success: true,
+              draft,
+            };
+          }
+        } catch {
+          // Fall back to local store
+        }
+      }
+
+      // 2. Fetch from local store
+      const raw = getStorageItem(`${DRAFT_KEY_PREFIX}${trimmedId}`);
       if (!raw) {
-        return { success: false, error: `Draft "${draftId}" not found.` };
+        return { success: false, error: `Draft "${trimmedId}" not found.` };
       }
 
       let parsed: unknown;
@@ -248,12 +335,62 @@ export const draftApi = {
   },
 
   /**
-   * Lists all available drafts, optionally filtered by schemaId.
-   * Corrupted drafts are safely skipped without failing the entire list.
-   * Returned drafts are sorted with the most recently updated first.
+   * Lists all drafts (status: draft), optionally filtered by schemaId.
+   * Synchronizes drafts from backend MongoDB API with local cache.
+   * Returned drafts are sorted newest-first.
    */
   async listDrafts(schemaId?: string): Promise<DraftListResult> {
     try {
+      // 1. Attempt fetching drafts from backend
+      try {
+        const queryParams = new URLSearchParams();
+        queryParams.set('status', 'draft');
+        if (schemaId) queryParams.set('formId', schemaId);
+
+        const res = await apiClient.get<ApiResponse<BackendDoc[]>>(
+          `/submissions?${queryParams.toString()}`
+        );
+
+        if (res.data?.success && Array.isArray(res.data.data)) {
+          const serverDrafts: FormDraft[] = res.data.data
+            .filter((doc) => doc.status === 'draft')
+            .filter((doc) => !schemaId || doc.formId === schemaId)
+            .map(mapDocToDraft);
+
+          // Update local cache and index with server drafts
+          const serverDraftIds = serverDrafts.map((d) => d.draftId);
+          for (const d of serverDrafts) {
+            setStorageItem(`${DRAFT_KEY_PREFIX}${d.draftId}`, JSON.stringify(d));
+          }
+          const localIndex = getDraftIndex();
+          saveDraftIndex([...localIndex, ...serverDraftIds]);
+
+          // Also check for any purely local drafts not on server
+          const localDrafts: FormDraft[] = [];
+          for (const id of localIndex) {
+            if (!serverDraftIds.includes(id)) {
+              const localRes = await this.getDraft(id);
+              if (localRes.success && localRes.draft) {
+                if (!schemaId || localRes.draft.schemaId === schemaId) {
+                  localDrafts.push(localRes.draft);
+                }
+              }
+            }
+          }
+
+          const combined = [...serverDrafts, ...localDrafts];
+          combined.sort((a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime());
+
+          return {
+            success: true,
+            drafts: combined,
+          };
+        }
+      } catch {
+        // Fall back to local store
+      }
+
+      // 2. Fallback to purely local store
       const index = getDraftIndex();
       const drafts: FormDraft[] = [];
 
@@ -266,7 +403,6 @@ export const draftApi = {
         }
       }
 
-      // Sort newest first
       drafts.sort((a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime());
 
       return {
@@ -280,7 +416,8 @@ export const draftApi = {
   },
 
   /**
-   * Deletes a draft by draftId and removes it from the index.
+   * Deletes a draft by draftId and removes it from local store/index.
+   * If draftId is a valid MongoDB ID, also deletes the draft from MongoDB.
    */
   async deleteDraft(draftId: string): Promise<DraftDeleteResult> {
     try {
@@ -288,10 +425,21 @@ export const draftApi = {
         return { success: false, error: 'Draft ID is required to delete.' };
       }
 
-      removeStorageItem(`${DRAFT_KEY_PREFIX}${draftId}`);
+      const trimmedId = draftId.trim();
 
-      const index = getDraftIndex().filter((id) => id !== draftId);
+      // 1. Remove from local store and index
+      removeStorageItem(`${DRAFT_KEY_PREFIX}${trimmedId}`);
+      const index = getDraftIndex().filter((id) => id !== trimmedId);
       saveDraftIndex(index);
+
+      // 2. If it is a backend MongoDB ID, attempt deletion from server
+      if (isValidMongoId(trimmedId)) {
+        try {
+          await apiClient.delete(`/submissions/${trimmedId}`);
+        } catch {
+          // If server reports 404 or cannot delete submitted doc, local cleanup succeeded
+        }
+      }
 
       return { success: true };
     } catch (err) {

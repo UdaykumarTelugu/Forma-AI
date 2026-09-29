@@ -4,6 +4,7 @@ import { ENV } from './config/env';
 import healthRoutes from './routes/healthRoutes';
 import formRoutes from './routes/formRoutes';
 import aiRoutes from './routes/aiRoutes';
+import submissionRoutes from './routes/submissionRoutes';
 import { notFound } from './middleware/notFound';
 import { errorHandler } from './middleware/errorHandler';
 
@@ -24,6 +25,7 @@ export const createApp = (): Application => {
   app.use('/api/health', healthRoutes);
   app.use('/api/forms', formRoutes);
   app.use('/api/ai', aiRoutes);
+  app.use('/api/submissions', submissionRoutes);
 
   // Catch-all & Error Middleware
   app.use(notFound);

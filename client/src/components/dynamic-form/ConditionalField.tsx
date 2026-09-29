@@ -3,6 +3,7 @@ import { useFormContext } from 'react-hook-form';
 import { ConditionalRule, FormValues } from '../../types/form';
 import { useConditionalLogic } from '../../hooks/useConditionalLogic';
 import { evaluateConditions } from '../../utils/conditionalLogic';
+import { AnimatedCollapse } from '../common/AnimatedCollapse';
 
 export interface ConditionalFieldProps {
   conditions?: ConditionalRule[] | ConditionalRule;
@@ -19,12 +20,16 @@ const WatchedConditionalField: React.FC<{
   children: React.ReactNode;
 }> = ({ rules, children }) => {
   const isVisible = useConditionalLogic(rules);
-  if (!isVisible) return null;
-  return <>{children}</>;
+  return (
+    <AnimatedCollapse isOpen={isVisible} className="forma-conditional-field-collapse">
+      <div className="forma-conditional-field-inner">{children}</div>
+    </AnimatedCollapse>
+  );
 };
 
 /**
  * ConditionalField - Wrapper that evaluates conditional logic to toggle field visibility
+ * with smooth, professional height and opacity transitions.
  */
 export const ConditionalField: React.FC<ConditionalFieldProps> = ({
   conditions,
@@ -46,8 +51,11 @@ export const ConditionalField: React.FC<ConditionalFieldProps> = ({
 
   // Fallback for isolated testing/rendering without FormProvider
   const isVisible = evaluateConditions(rules, explicitValues || {});
-  if (!isVisible) return null;
-  return <>{children}</>;
+  return (
+    <AnimatedCollapse isOpen={isVisible} className="forma-conditional-field-collapse">
+      <div className="forma-conditional-field-inner">{children}</div>
+    </AnimatedCollapse>
+  );
 };
 
 export default ConditionalField;

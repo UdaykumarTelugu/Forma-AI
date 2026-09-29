@@ -1,25 +1,35 @@
 import React from 'react';
 
 export interface ButtonProps extends React.ButtonHTMLAttributes<HTMLButtonElement> {
-  variant?: 'primary' | 'secondary' | 'outline' | 'danger';
+  variant?: 'primary' | 'secondary' | 'outline' | 'ghost' | 'danger';
+  size?: 'sm' | 'md' | 'lg';
   isLoading?: boolean;
+  icon?: React.ReactNode;
 }
 
 export const Button: React.FC<ButtonProps> = ({
   children,
   variant = 'primary',
+  size = 'md',
   isLoading = false,
+  icon,
   disabled,
+  className = '',
   ...props
 }) => {
-  // TODO: Enhance with design system styles and loading spinner
   return (
     <button
+      className={`forma-btn forma-btn-${variant} forma-btn-${size} ${isLoading ? 'forma-btn-loading' : ''} ${className}`}
       disabled={disabled || isLoading}
-      data-variant={variant}
+      aria-busy={isLoading}
       {...props}
     >
-      {isLoading ? 'Loading...' : children}
+      {isLoading ? (
+        <span className="forma-btn-spinner" aria-hidden="true" />
+      ) : (
+        icon && <span className="forma-btn-icon">{icon}</span>
+      )}
+      <span className="forma-btn-text">{children}</span>
     </button>
   );
 };

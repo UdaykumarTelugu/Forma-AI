@@ -1,55 +1,85 @@
-import React, { useState, useMemo, useCallback, useEffect } from 'react';
-import { useForm } from 'react-hook-form';
+import React, { useState, useMemo, useEffect } from 'react';
+import { useForm, FormProvider } from 'react-hook-form';
 import { useFormSchema } from '../hooks/useFormSchema';
 import { Loading } from '../components/common/Loading';
 import { ErrorMessage } from '../components/common/ErrorMessage';
-import { DynamicForm } from '../components/dynamic-form/DynamicForm';
-import { MagicInput } from '../components/ai/MagicInput';
+import { Button } from '../components/common/Button';
+import { Card } from '../components/common/Card';
+import { Badge } from '../components/common/Badge';
+import {
+  SparklesIcon,
+  CheckCircleIcon,
+  AlertCircleIcon,
+  ArrowRightIcon,
+  ArrowLeftIcon,
+  ClockIcon,
+  CheckIcon,
+  EditIcon,
+  SendIcon,
+  FileTextIcon,
+  FolderIcon,
+} from '../components/common/Icons';
+import { FormSection } from '../components/dynamic-form/FormSection';
+import { FieldRenderer } from '../components/dynamic-form/FieldRenderer';
 import {
   mapExtractionToFormFields,
   getAllSchemaFields,
   ExtractionMappingSummary,
 } from '../utils/aiFormMapping';
-import { filterActiveVisibleFields } from '../utils/conditionalLogic';
+import { filterActiveVisibleFields, getNestedValue } from '../utils/conditionalLogic';
 import { computeFormReadiness, cleanSubmissionPayload } from '../utils/validation';
 import { useAiSuggestionStore } from '../stores/aiSuggestionStore';
 import { ClaimExtractionResult } from '../types/ai';
-import { FormValues, FormSubmissionPayload, SubmissionStatus, FormDraft } from '../types/form';
+import { FormValues, FormSubmissionPayload, SubmissionStatus, FormSchema, FormField } from '../types/form';
 import { submitClaimForm } from '../services/submissionApi';
 import { draftApi, checkDraftCompatibility } from '../services/draftApi';
+import { aiApi } from '../services/aiApi';
 
-/**
- * ClaimFormPage - Integrates Form Schema API, MagicInput AI extraction,
- * and DynamicForm renderer with Human-in-the-Loop review and field-level feedback.
- *
- * Human-in-the-Loop Flow:
- * 1. User inputs unstructured claim description.
- * 2. AI extracts candidate facts based on active MongoDB FormSchema.
- * 3. Schema-driven mapping checks compatibility and respects manual user edits.
- * 4. Compatible fields are applied to React Hook Form and marked with accessible AI badges.
- * 5. Extraction review banner summarizes populated fields, missing required fields, and rejected values.
- * 6. "Review AI fields" interaction allows 1-click jump to AI-populated fields.
- * 7. Any manual edit immediately transitions the field to reviewed state.
- * 8. User can clear AI markers without erasing values, or reset the entire form.
- */
-export const ClaimFormPage: React.FC = () => {
-  const { schema, loading, error, refetch } = useFormSchema('auto-insurance-claim');
+export interface ClaimFormPageProps {
+  initialDraftId?: string | null;
+  initialSchema?: FormSchema;
+  onNavigateHome?: () => void;
+  onViewAllClaims?: () => void;
+  onViewClaimDetails?: (claimId: string) => void;
+}
+
+export type StepperStage = 'describe' | 'analyzing' | 'extracted' | 'form' | 'review' | 'success';
+
+const SAMPLE_NARRATIVES = [
+  'I was driving my Honda Civic yesterday when I collided with a deer. The front windshield was damaged.',
+  'A truck rear-ended my 2021 Ford F-150 at a red light on Highway 101, damaging the tailgate and bumper.',
+  'Severe hail storm yesterday dented the entire roof and hood of my Toyota Camry while parked outside.',
+];
+
+export const ClaimFormPage: React.FC<ClaimFormPageProps> = ({
+  initialDraftId = null,
+  initialSchema,
+  onNavigateHome,
+  onViewAllClaims,
+}) => {
+  const schemaHookResult = useFormSchema('auto-insurance-claim');
+  const schema = initialSchema || schemaHookResult.schema;
+  const loading = initialSchema ? false : schemaHookResult.loading;
+  const error = initialSchema ? null : schemaHookResult.error;
+  const refetch = schemaHookResult.refetch;
+
+  const [currentStage, setCurrentStage] = useState<StepperStage>('describe');
+  const [incidentText, setIncidentText] = useState<string>('');
+  const [rawExtractionResult, setRawExtractionResult] = useState<ClaimExtractionResult | null>(null);
+  const [extractionError, setExtractionError] = useState<string | null>(null);
+
+  // Review & Submission state
   const [reviewSummary, setReviewSummary] = useState<ExtractionMappingSummary | null>(null);
   const [submissionBlockedMessage, setSubmissionBlockedMessage] = useState<string | null>(null);
   const [submissionStatus, setSubmissionStatus] = useState<SubmissionStatus>('idle');
   const [submissionError, setSubmissionError] = useState<string | null>(null);
+  const [confirmedSubmissionId, setConfirmedSubmissionId] = useState<string | null>(null);
   const [finalSubmissionPayload, setFinalSubmissionPayload] = useState<FormSubmissionPayload | null>(null);
 
-  // Draft Management State (Week 4 Step 1)
-  const [activeDraftId, setActiveDraftId] = useState<string | null>(null);
-  const [activeDraftUpdatedAt, setActiveDraftUpdatedAt] = useState<string | null>(null);
+  // Draft Management State
+  const [activeDraftId, setActiveDraftId] = useState<string | null>(initialDraftId);
   const [isSavingDraft, setIsSavingDraft] = useState<boolean>(false);
-  const [draftFeedback, setDraftFeedback] = useState<{
-    type: 'success' | 'error' | 'warning' | 'info';
-    message: string;
-  } | null>(null);
-  const [isDraftsPanelOpen, setIsDraftsPanelOpen] = useState<boolean>(false);
-  const [savedDrafts, setSavedDrafts] = useState<FormDraft[]>([]);
+  const [draftNotice, setDraftNotice] = useState<string | null>(null);
 
   const {
     setAiSuggestions,
@@ -64,911 +94,830 @@ export const ClaimFormPage: React.FC = () => {
   const form = useForm<FormValues>({
     mode: 'onChange',
     defaultValues: {},
-    shouldUnregister: true,
+    shouldUnregister: false,
   });
+
+  const [reviewValues, setReviewValues] = useState<FormValues>({});
 
   const allSchemaFields = useMemo(
     () => (schema ? getAllSchemaFields(schema) : []),
     [schema]
   );
 
-  // Watch current form values for real-time validation and conditional calculations
   const currentValues = form.watch();
 
-  // Active unreviewed AI fields (suggested by AI, but not yet reviewed/edited/confirmed)
-  const unreviewedAiFieldNames = useMemo(() => {
-    return Object.keys(aiSuggestedFields).filter(
-      (fieldName) => !userReviewedFields[fieldName] && !userModifiedFields[fieldName]
+  const valuesSnapshot = useMemo(() => {
+    if (currentStage === 'review' && Object.keys(reviewValues).length > 0) {
+      return reviewValues;
+    }
+    return currentValues;
+  }, [currentStage, reviewValues, currentValues]);
+
+  const activeFields = useMemo(() => {
+    if (!schema) return [];
+    return filterActiveVisibleFields(allSchemaFields, valuesSnapshot);
+  }, [schema, allSchemaFields, valuesSnapshot]);
+
+  const readiness = useMemo(() => {
+    const unreviewedAi = Object.keys(aiSuggestedFields).filter(
+      (f) => !userReviewedFields[f] && !userModifiedFields[f]
     );
-  }, [aiSuggestedFields, userReviewedFields, userModifiedFields]);
+    const formErrors = form.formState.errors;
+    return computeFormReadiness(activeFields, valuesSnapshot, formErrors, unreviewedAi);
+  }, [activeFields, valuesSnapshot, form.formState.errors, aiSuggestedFields, userReviewedFields, userModifiedFields]);
 
-  // Active fields dynamically filtered by conditional visibility engine (hierarchical)
-  const activeVisibleFields = useMemo(() => {
-    if (!schema || allSchemaFields.length === 0) return [];
-    return filterActiveVisibleFields(allSchemaFields, currentValues);
-  }, [schema, allSchemaFields, currentValues]);
+  // Load draft if initialDraftId provided
+  useEffect(() => {
+    if (!initialDraftId || !schema) return;
 
-  // Unified Form Readiness derived from schema, active fields, current values, RHF errors, and unreviewed AI suggestions
-  const formReadiness = useMemo(() => {
-    return computeFormReadiness(
-      activeVisibleFields,
-      currentValues,
-      form.formState.errors,
-      unreviewedAiFieldNames
-    );
-  }, [activeVisibleFields, currentValues, form.formState.errors, unreviewedAiFieldNames]);
+    const loadDraft = async () => {
+      const res = await draftApi.getDraft(initialDraftId);
+      if (res.success && res.draft) {
+        const draft = res.draft;
+        const compat = checkDraftCompatibility(draft, schema.schemaId || schema.id || '', schema.version || 1);
+        if (compat.compatible) {
+          form.reset(draft.values);
+          setActiveDraftId(draft.draftId);
+          setCurrentStage('form');
+        }
+      }
+    };
+    void loadDraft();
+  }, [initialDraftId, schema, form]);
 
-  const missingRequiredFields = formReadiness.missingRequired;
+  // Handle AI analysis
+  const handleAnalyzeWithAi = async () => {
+    if (!incidentText.trim()) return;
 
-  const handleAiAutofill = async (extractionResult: ClaimExtractionResult) => {
-    if (!schema) return;
+    setCurrentStage('analyzing');
+    setExtractionError(null);
 
-    // Map extraction safely against schema with user edit protection
-    const mappingSummary = mapExtractionToFormFields(schema, extractionResult, {
-      userModifiedFields,
-      currentValues: form.getValues(),
-    });
+    try {
+      const result = await aiApi.extractClaim(incidentText, schema?.schemaId || 'auto-insurance-claim');
+      setRawExtractionResult(result);
 
-    // Apply valid candidate values into React Hook Form
-    for (const item of mappingSummary.applied) {
-      form.setValue(item.fieldName, item.value, {
+      if (schema) {
+        const mapping = mapExtractionToFormFields(schema, result, {
+          userModifiedFields,
+          currentValues: form.getValues(),
+        });
+        setReviewSummary(mapping);
+      }
+
+      setCurrentStage('extracted');
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'AI analysis failed.';
+      setExtractionError(msg);
+      setCurrentStage('describe');
+    }
+  };
+
+  // Continue from AI review card into dynamic form
+  const handleContinueToForm = () => {
+    const descField: string = 'incident.description';
+    if (!schema || !reviewSummary) {
+      if (incidentText.trim() && !form.getValues(descField)) {
+        form.setValue(descField, incidentText.trim(), { shouldValidate: true });
+      }
+      setCurrentStage('form');
+      return;
+    }
+
+    const newAiValues: Record<string, unknown> = {};
+    for (const applied of reviewSummary.applied) {
+      form.setValue(applied.fieldName, applied.value, {
         shouldValidate: true,
         shouldDirty: false,
-        shouldTouch: true,
       });
+      newAiValues[applied.fieldName] = applied.value;
     }
 
-    // Trigger validation pass so all candidate values participate in RHF validation
-    await form.trigger();
-
-    // Register applied fields in suggestion metadata store
-    const suggestionsMap: Record<string, unknown> = {};
-    for (const item of mappingSummary.applied) {
-      suggestionsMap[item.fieldName] = item.value;
+    // Preserve original narrative in incident.description if not extracted
+    if (incidentText.trim() && !form.getValues(descField)) {
+      form.setValue(descField, incidentText.trim(), { shouldValidate: true });
     }
-    setAiSuggestions(suggestionsMap);
 
-    setReviewSummary(mappingSummary);
-    setFinalSubmissionPayload(null);
-    setSubmissionBlockedMessage(null);
-    setSubmissionError(null);
-    setSubmissionStatus('idle');
+    setAiSuggestions(newAiValues);
+    setCurrentStage('form');
   };
 
-  const handleClearMarkers = () => {
-    clearAiMarkers();
-  };
-
-  const handleResetEntireForm = () => {
-    form.reset();
-    resetAiStore();
-    setReviewSummary(null);
-    setFinalSubmissionPayload(null);
-    setSubmissionBlockedMessage(null);
-    setSubmissionError(null);
-    setSubmissionStatus('idle');
-    setActiveDraftId(null);
-    setActiveDraftUpdatedAt(null);
-    setDraftFeedback(null);
-  };
-
-  // Load saved drafts for active schema
-  const loadSavedDrafts = useCallback(async () => {
-    if (!schema) return;
-    const result = await draftApi.listDrafts(schema.schemaId);
-    if (result.success) {
-      setSavedDrafts(result.drafts);
+  // Continue to form manually without AI extraction
+  const handleContinueManually = () => {
+    const descField: string = 'incident.description';
+    if (incidentText.trim() && !form.getValues(descField)) {
+      form.setValue(descField, incidentText.trim(), { shouldValidate: true });
     }
-  }, [schema]);
+    setCurrentStage('form');
+  };
 
-  useEffect(() => {
-    void loadSavedDrafts();
-  }, [loadSavedDrafts]);
-
-  // Save current progress as draft without submission or required-field gates
+  // Save Draft
   const handleSaveDraft = async () => {
     if (!schema) return;
     setIsSavingDraft(true);
-    setDraftFeedback(null);
+    setDraftNotice(null);
 
     try {
-      const currentFormData = form.getValues();
-      const result = await draftApi.saveDraft({
+      const values = form.getValues();
+      const res = await draftApi.saveDraft({
         draftId: activeDraftId || undefined,
-        schemaId: schema.schemaId,
-        schemaVersion: schema.version,
-        values: currentFormData,
+        schemaId: schema.schemaId || schema.id || 'auto-insurance-claim',
+        schemaVersion: schema.version || 1,
+        values,
       });
 
-      if (result.success && result.draft) {
-        setActiveDraftId(result.draft.draftId);
-        setActiveDraftUpdatedAt(result.draft.updatedAt);
-        setDraftFeedback({
-          type: 'success',
-          message: `Draft saved successfully (${result.draft.draftId}) at ${new Date(result.draft.updatedAt).toLocaleTimeString()}.`,
-        });
-        await loadSavedDrafts();
-      } else {
-        setDraftFeedback({
-          type: 'error',
-          message: result.error || 'Failed to save draft.',
-        });
+      if (res.success && res.draft) {
+        setActiveDraftId(res.draft.draftId);
+        setDraftNotice(`Draft saved at ${new Date().toLocaleTimeString()}`);
+        setTimeout(() => setDraftNotice(null), 4000);
       }
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : 'An error occurred while saving the draft.';
-      setDraftFeedback({ type: 'error', message: msg });
+    } catch {
+      setDraftNotice('Failed to save draft.');
     } finally {
       setIsSavingDraft(false);
     }
   };
 
-  // Resume a previously saved draft
-  const handleResumeDraft = async (draftId: string) => {
-    if (!schema) return;
-    setDraftFeedback(null);
-
-    const result = await draftApi.getDraft(draftId);
-    if (!result.success || !result.draft) {
-      setDraftFeedback({
-        type: 'error',
-        message: result.error || 'Could not retrieve draft.',
-      });
+  // Move from Form to Review
+  const handleProceedToReview = async () => {
+    const isValid = await form.trigger();
+    if (!isValid) {
+      setSubmissionBlockedMessage('Please resolve highlighted form validation errors before proceeding.');
       return;
     }
-
-    const draft = result.draft;
-    const compat = checkDraftCompatibility(draft, schema.schemaId, schema.version);
-
-    if (!compat.compatible) {
-      setDraftFeedback({
-        type: 'error',
-        message: compat.message || 'Draft is incompatible with the current form schema.',
-      });
-      return;
-    }
-
-    // Restore values into React Hook Form
-    form.reset(draft.values);
-    // Re-run validation logic
-    await form.trigger();
-
-    setActiveDraftId(draft.draftId);
-    setActiveDraftUpdatedAt(draft.updatedAt);
-    setIsDraftsPanelOpen(false);
     setSubmissionBlockedMessage(null);
-    setSubmissionError(null);
-    setFinalSubmissionPayload(null);
-    setReviewSummary(null);
-
-    if (compat.status === 'version_mismatch') {
-      setDraftFeedback({
-        type: 'warning',
-        message: compat.message!,
-      });
-    } else {
-      setDraftFeedback({
-        type: 'success',
-        message: `Draft ${draft.draftId} resumed. Restored previously entered values.`,
-      });
-    }
+    const latestValues = form.getValues();
+    setReviewValues(latestValues);
+    setCurrentStage('review');
   };
 
-  // Delete a draft
-  const handleDeleteDraft = async (draftId: string) => {
-    const result = await draftApi.deleteDraft(draftId);
-    if (result.success) {
-      if (activeDraftId === draftId) {
-        setActiveDraftId(null);
-        setActiveDraftUpdatedAt(null);
-      }
-      await loadSavedDrafts();
-      setDraftFeedback({
-        type: 'info',
-        message: `Draft ${draftId} was deleted.`,
-      });
-    } else {
-      setDraftFeedback({
-        type: 'error',
-        message: result.error || 'Failed to delete draft.',
-      });
-    }
-  };
-
-  const handleStartFresh = () => {
-    handleResetEntireForm();
-    setActiveDraftId(null);
-    setActiveDraftUpdatedAt(null);
-    setDraftFeedback(null);
-    setIsDraftsPanelOpen(false);
-  };
-
-  const handleReviewAiFields = useCallback(() => {
-    const firstSuggestedField = Object.keys(aiSuggestedFields).find(
-      (name) => !userModifiedFields[name]
-    );
-    if (firstSuggestedField) {
-      const target =
-        document.querySelector(`[data-field-name="${firstSuggestedField}"]`) ||
-        document.getElementById(`field-container-${firstSuggestedField}`) ||
-        document.getElementById(firstSuggestedField);
-      if (target) {
-        target.scrollIntoView({ behavior: 'smooth', block: 'center' });
-        const input = target.querySelector('input, select, textarea') as HTMLElement | null;
-        if (input) {
-          input.focus();
-        }
-      }
-    }
-  }, [aiSuggestedFields, userModifiedFields]);
-
-  const handleFormSubmit = async (data: FormValues) => {
+  // Submit Claim
+  const handleSubmitFinal = async () => {
     if (!schema) return;
-
-    // 1. Prevent double submission
-    if (submissionStatus === 'submitting') {
-      return;
-    }
-
-    // 2. Final Submission Guard: independently verify readiness
-    if (formReadiness.status !== 'READY') {
-      if (formReadiness.activeErrors.length > 0) {
-        setSubmissionBlockedMessage(
-          `Submission blocked: Please resolve ${formReadiness.activeErrors.length} field error(s) before submitting.`
-        );
-      } else if (formReadiness.missingRequired.length > 0) {
-        setSubmissionBlockedMessage(
-          `Submission blocked: ${formReadiness.missingRequired.length} required field(s) still need to be completed.`
-        );
-      } else if (formReadiness.unreviewedAiFields.length > 0) {
-        setSubmissionBlockedMessage(
-          `Submission blocked: Please review the ${formReadiness.unreviewedAiFields.length} field(s) suggested by AI before submitting.`
-        );
-      } else {
-        setSubmissionBlockedMessage('Submission blocked: Form is not ready for submission.');
-      }
-      setSubmissionStatus('idle');
-      return;
-    }
-
-    setSubmissionBlockedMessage(null);
-    setSubmissionError(null);
     setSubmissionStatus('submitting');
+    setSubmissionError(null);
 
     try {
-      // 3. Payload Cleanup: retain only currently active visible fields
-      const cleanedValues = cleanSubmissionPayload(data, activeVisibleFields);
+      const rawValues = Object.keys(reviewValues).length > 0 ? reviewValues : form.getValues();
+      const cleanedValues = cleanSubmissionPayload(rawValues, activeFields);
 
-      // 4. Construct final typed submission payload contract
       const payload: FormSubmissionPayload = {
-        schemaId: schema.schemaId,
-        schemaVersion: schema.version,
+        schemaId: schema.schemaId || schema.id || 'auto-insurance-claim',
+        schemaVersion: schema.version || 1,
         values: cleanedValues,
         submittedAt: new Date().toISOString(),
+        draftId: activeDraftId || undefined,
       };
 
-      // 5. Submit via typed service abstraction
       const result = await submitClaimForm(payload);
 
       if (result.success) {
-        setFinalSubmissionPayload(result.payload || payload);
+        setFinalSubmissionPayload(payload);
+        const subId = result.submissionId || 'CLM-SUBMITTED';
+        setConfirmedSubmissionId(subId);
         setSubmissionStatus('success');
+        setCurrentStage('success');
 
-        // Week 4 Step 1: Successfully submitted draft should no longer remain an active editable draft
+        // Delete active draft if this was from a draft
         if (activeDraftId) {
-          await draftApi.deleteDraft(activeDraftId);
-          setActiveDraftId(null);
-          setActiveDraftUpdatedAt(null);
-          await loadSavedDrafts();
+          void draftApi.deleteDraft(activeDraftId);
         }
       } else {
-        setSubmissionError(result.error || 'Submission failed. Please try again.');
         setSubmissionStatus('error');
+        setSubmissionError(result.error || 'Submission failed.');
       }
     } catch (err) {
-      const msg =
-        err instanceof Error ? err.message : 'An unexpected error occurred during submission.';
-      setSubmissionError(msg);
+      const msg = err instanceof Error ? err.message : 'An error occurred during submission.';
       setSubmissionStatus('error');
+      setSubmissionError(msg);
     }
   };
 
-  // Pre-submission review summary checklist node
-  const reviewSummaryNode = useMemo(() => {
-    const hasErrors = formReadiness.activeErrors.length > 0;
-    const hasMissing = formReadiness.missingRequired.length > 0;
-    const hasUnreviewed = formReadiness.unreviewedAiFields.length > 0;
-    const isReady = formReadiness.status === 'READY';
-
-    const activeReviewedAiCount = Object.keys(userReviewedFields).filter((name) =>
-      activeVisibleFields.some((f) => f.name === name)
-    ).length;
-
-    return (
-      <div className="submission-review-summary" role="region" aria-label="Pre-submission review checklist">
-        <div className="review-summary-header">
-          <span className="review-summary-title">Form Review</span>
-          <span className={`review-summary-badge ${isReady ? 'badge-ready' : 'badge-action'}`}>
-            {isReady ? '✓ Ready for Submission' : '⚠ Action Required'}
-          </span>
-        </div>
-
-        <ul className="review-checklist" aria-label="Readiness criteria">
-          <li className={`checklist-item ${hasMissing ? 'item-incomplete' : 'item-complete'}`}>
-            <span className="item-icon" aria-hidden="true">{hasMissing ? '○' : '✓'}</span>
-            <span className="item-text">
-              {hasMissing
-                ? `${formReadiness.missingRequired.length} required field(s) still need to be completed`
-                : 'All required fields complete'}
-            </span>
-          </li>
-
-          <li className={`checklist-item ${hasErrors ? 'item-error' : 'item-complete'}`}>
-            <span className="item-icon" aria-hidden="true">{hasErrors ? '⚠️' : '✓'}</span>
-            <span className="item-text">
-              {hasErrors
-                ? `${formReadiness.activeErrors.length} field(s) require review or correction`
-                : 'No validation errors'}
-            </span>
-          </li>
-
-          <li className={`checklist-item ${hasUnreviewed ? 'item-warning' : 'item-complete'}`}>
-            <span className="item-icon" aria-hidden="true">{hasUnreviewed ? '⚠️' : '✓'}</span>
-            <span className="item-text">
-              {hasUnreviewed
-                ? `${formReadiness.unreviewedAiFields.length} AI suggestion(s) need review`
-                : activeReviewedAiCount > 0
-                ? `All AI suggestions reviewed (${activeReviewedAiCount} confirmed)`
-                : 'All AI suggestions reviewed'}
-            </span>
-            {hasUnreviewed && (
-              <button
-                type="button"
-                className="checklist-review-btn"
-                onClick={handleReviewAiFields}
-                title="Jump to the first unreviewed AI suggestion"
-              >
-                Review AI Fields
-              </button>
-            )}
-          </li>
-        </ul>
-      </div>
-    );
-  }, [formReadiness, userReviewedFields, activeVisibleFields, handleReviewAiFields]);
-
-  const activeAiMarkerCount = Object.keys(aiSuggestedFields).filter(
-    (fieldName) => !userModifiedFields[fieldName]
-  ).length;
+  // Reset for new claim
+  const handleStartAnother = () => {
+    form.reset({});
+    setReviewValues({});
+    resetAiStore();
+    clearAiMarkers();
+    setIncidentText('');
+    setRawExtractionResult(null);
+    setReviewSummary(null);
+    setActiveDraftId(null);
+    setSubmissionStatus('idle');
+    setConfirmedSubmissionId(null);
+    setFinalSubmissionPayload(null);
+    setCurrentStage('describe');
+  };
 
   if (loading) {
+    return <Loading message="Loading claim form schema..." fullPage />;
+  }
+
+  if (error || !schema) {
     return (
-      <div className="claim-page-loading" style={{ padding: '2rem', textAlign: 'center' }}>
-        <Loading message="Loading auto-insurance-claim schema from API..." />
+      <div className="forma-page-container">
+        <ErrorMessage
+          title="Schema Loading Error"
+          message={error || 'Unable to load form schema from server.'}
+          onRetry={refetch}
+        />
       </div>
     );
   }
 
-  if (error) {
-    return (
-      <div className="claim-page-error" style={{ padding: '2rem', maxWidth: '600px', margin: '0 auto' }}>
-        <h2>Unable to Load Form</h2>
-        <ErrorMessage message={error} onRetry={refetch} />
-      </div>
-    );
-  }
+  // Stepper UI helper
+  const getStepClass = (step: number) => {
+    let currentStepNum = 1;
+    if (currentStage === 'describe') currentStepNum = 1;
+    else if (currentStage === 'analyzing' || currentStage === 'extracted') currentStepNum = 2;
+    else if (currentStage === 'form') currentStepNum = 3;
+    else if (currentStage === 'review' || currentStage === 'success') currentStepNum = 4;
 
-  if (!schema) {
+    if (currentStepNum > step) return 'forma-step-completed';
+    if (currentStepNum === step) return 'forma-step-active';
+    return 'forma-step-pending';
+  };
+
+  const hasSections = Array.isArray(schema.sections) && schema.sections.length > 0;
+  const hasFields = Array.isArray(schema.fields) && schema.fields.length > 0;
+
+  const renderReviewFieldValue = (field: FormField) => {
+    const val = getNestedValue(valuesSnapshot, field.name);
+    const isAi = field.name in aiSuggestedFields;
+
+    let displayValue: React.ReactNode = null;
+    if (val !== undefined && val !== null && val !== '') {
+      if (field.type === 'select' && field.options) {
+        const matching = field.options.find((opt) => String(opt.value) === String(val));
+        displayValue = matching ? matching.label : String(val);
+      } else if (field.type === 'checkbox') {
+        displayValue = val === true || val === 'true' ? 'Yes' : 'No';
+      } else if (Array.isArray(val)) {
+        displayValue = val.join(', ');
+      } else {
+        displayValue = String(val);
+      }
+    }
+
     return (
-      <div style={{ padding: '2rem' }}>
-        <p>No schema available.</p>
+      <div key={field.id} className="forma-review-field">
+        <div className="forma-review-label-wrap">
+          <span className="forma-review-label">{field.label}</span>
+          {isAi && <Badge variant="ai" size="sm">AI suggested</Badge>}
+        </div>
+        <span className="forma-review-value">
+          {displayValue !== null ? (
+            displayValue
+          ) : (
+            <span className="forma-text-muted">Not specified</span>
+          )}
+        </span>
       </div>
     );
-  }
+  };
 
   return (
-    <div className="claim-form-page" style={{ maxWidth: '840px', margin: '0 auto', padding: '1.5rem' }}>
-      <header style={{ borderBottom: '2px solid #e2e8f0', paddingBottom: '1rem', marginBottom: '1.5rem' }}>
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '0.75rem' }}>
-          <div>
-            <span style={{ fontSize: '0.85rem', color: '#64748b', fontWeight: 600, textTransform: 'uppercase', letterSpacing: '0.05em' }}>
-              Forma AI &middot; Dynamic Form Engine
-            </span>
-            <div style={{ display: 'flex', gap: '0.75rem', marginTop: '0.5rem', flexWrap: 'wrap' }}>
-              <span style={{ background: '#e0f2fe', color: '#0369a1', padding: '0.2rem 0.6rem', borderRadius: '9999px', fontSize: '0.8rem' }}>
-                Schema: <strong>{schema.schemaId}</strong>
-              </span>
-              <span style={{ background: '#f0fdf4', color: '#15803d', padding: '0.2rem 0.6rem', borderRadius: '9999px', fontSize: '0.8rem' }}>
-                v{schema.version}
-              </span>
-              <span style={{ background: '#fef3c7', color: '#b45309', padding: '0.2rem 0.6rem', borderRadius: '9999px', fontSize: '0.8rem' }}>
-                {schema.fields?.length || 0} Fields
-              </span>
-              <span style={{ background: '#f3e8ff', color: '#7e22ce', padding: '0.2rem 0.6rem', borderRadius: '9999px', fontSize: '0.8rem' }}>
-                {schema.sections?.length || 0} Sections
-              </span>
-            </div>
+    <div className="forma-page-container forma-claim-flow">
+      {/* Header & Stepper */}
+      <div className="forma-flow-header">
+        <div>
+          <span className="forma-flow-eyebrow">Insurance Claim Intake</span>
+          <h1 className="forma-flow-title">New Insurance Claim</h1>
+          <p className="forma-flow-desc">
+            Describe what happened in your own words. Forma AI will extract relevant information and guide you through the required questions.
+          </p>
+        </div>
+
+        {/* Stepper (01 Describe Incident -> 02 AI Analysis -> 03 Review -> 04 Submit) */}
+        <div className="forma-stepper" role="navigation" aria-label="Claim Progress">
+          <div className={`forma-step-item ${getStepClass(1)}`}>
+            <span className="forma-step-num">01</span>
+            <span className="forma-step-label">Describe Incident</span>
           </div>
-          <div style={{ display: 'flex', gap: '0.5rem', alignItems: 'center', flexWrap: 'wrap' }}>
-            <button
-              type="button"
-              className="drafts-toggle-btn"
-              onClick={() => setIsDraftsPanelOpen((prev) => !prev)}
-              title="View and manage saved drafts"
-              style={{
-                padding: '0.5rem 0.85rem',
-                backgroundColor: isDraftsPanelOpen ? '#e0f2fe' : '#ffffff',
-                border: '1.5px solid #38bdf8',
-                borderRadius: '6px',
-                cursor: 'pointer',
-                fontSize: '0.875rem',
-                color: '#0369a1',
-                fontWeight: 600,
-                display: 'flex',
-                alignItems: 'center',
-                gap: '0.4rem',
-              }}
-            >
-              <span aria-hidden="true">📁</span>
-              <span>Saved Drafts</span>
-              <span
-                style={{
-                  background: '#0284c7',
-                  color: '#ffffff',
-                  padding: '0.1rem 0.45rem',
-                  borderRadius: '9999px',
-                  fontSize: '0.75rem',
-                  fontWeight: 700,
-                }}
-              >
-                {savedDrafts.length}
-              </span>
-            </button>
-
-            {activeDraftId && (
-              <button
-                type="button"
-                onClick={handleStartFresh}
-                style={{
-                  padding: '0.5rem 0.85rem',
-                  backgroundColor: '#f8fafc',
-                  border: '1px solid #cbd5e1',
-                  borderRadius: '6px',
-                  cursor: 'pointer',
-                  fontSize: '0.875rem',
-                  color: '#475569',
-                  fontWeight: 500,
-                }}
-                title="Discard active draft view and start with a blank form"
-              >
-                + Start Blank Form
-              </button>
-            )}
-
-            <button
-              type="button"
-              onClick={() => {
-                handleResetEntireForm();
-                void refetch();
-              }}
-              style={{
-                padding: '0.5rem 1rem',
-                backgroundColor: '#f1f5f9',
-                border: '1px solid #cbd5e1',
-                borderRadius: '6px',
-                cursor: 'pointer',
-                fontSize: '0.875rem',
-                color: '#334155',
-                fontWeight: 500,
-              }}
-            >
-              Refetch Schema
-            </button>
+          <div className="forma-step-divider" />
+          <div className={`forma-step-item ${getStepClass(2)}`}>
+            <span className="forma-step-num">02</span>
+            <span className="forma-step-label">AI Analysis</span>
+          </div>
+          <div className="forma-step-divider" />
+          <div className={`forma-step-item ${getStepClass(3)}`}>
+            <span className="forma-step-num">03</span>
+            <span className="forma-step-label">Review</span>
+          </div>
+          <div className="forma-step-divider" />
+          <div className={`forma-step-item ${getStepClass(4)}`}>
+            <span className="forma-step-num">04</span>
+            <span className="forma-step-label">Submit</span>
           </div>
         </div>
-      </header>
+      </div>
 
-      {/* Week 4 Step 1: Drafts List Drawer / Modal */}
-      {isDraftsPanelOpen && (
-        <div className="drafts-drawer-backdrop" onClick={() => setIsDraftsPanelOpen(false)}>
-          <div
-            className="drafts-panel"
-            onClick={(e) => e.stopPropagation()}
-            role="dialog"
-            aria-label="Saved Form Drafts"
-          >
-            <div className="drafts-panel-header">
-              <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-                <span style={{ fontSize: '1.25rem' }}>📁</span>
-                <h3 style={{ margin: 0, fontSize: '1.1rem', color: '#0f172a' }}>
-                  Saved Form Drafts ({savedDrafts.length})
-                </h3>
-              </div>
-              <button
-                type="button"
-                className="drafts-panel-close-btn"
-                onClick={() => setIsDraftsPanelOpen(false)}
-                aria-label="Close drafts panel"
-              >
-                ✕
-              </button>
+      {/* =========================================================================
+          PAGE 3: STAGE 1 — DESCRIBE INCIDENT
+      ========================================================================= */}
+      {currentStage === 'describe' && (
+        <Card
+          title={
+            <div className="forma-card-title-row">
+              <SparklesIcon size={18} color="#0ea5e9" />
+              <span>Describe the incident</span>
             </div>
+          }
+          subtitle="Describe what happened in your own words. Forma AI will identify relevant information and guide you through the required questions."
+        >
+          <div className="forma-describe-box">
+            <textarea
+              className="forma-textarea forma-textarea-lg"
+              rows={5}
+              value={incidentText}
+              onChange={(e) => setIncidentText(e.target.value)}
+              placeholder="I was driving my Honda Civic yesterday when I hit a deer. The front windshield was damaged."
+              aria-label="Incident description"
+            />
 
-            <p style={{ fontSize: '0.85rem', color: '#64748b', margin: '0.5rem 0 1rem 0' }}>
-              Drafts for schema <strong>{schema.schemaId}</strong> (v{schema.version}). Resuming a draft restores previously entered values and re-evaluates validation and conditional rules.
+            <p className="forma-field-helper">
+              Describe what happened in your own words. Forma AI will identify relevant information and guide you through the required questions.
             </p>
 
-            {savedDrafts.length === 0 ? (
-              <div className="drafts-empty-state">
-                <p style={{ margin: '0 0 0.5rem 0', fontWeight: 600 }}>No saved drafts found.</p>
-                <span style={{ fontSize: '0.8rem', color: '#94a3b8' }}>
-                  Click &ldquo;Save Draft&rdquo; below the form anytime to preserve your current progress.
-                </span>
+            {extractionError && (
+              <div className="forma-extraction-failed-box forma-mt-md" role="alert">
+                <div className="forma-failed-header">
+                  <div className="forma-failed-icon">
+                    <AlertCircleIcon size={20} color="#f59e0b" />
+                  </div>
+                  <div className="forma-failed-title-group">
+                    <h3 className="forma-failed-heading">AI analysis couldn&rsquo;t be completed.</h3>
+                    <p className="forma-failed-desc">
+                      AI extraction requires the configured OPENAI_API_KEY. Your information is safe. You can continue by entering the claim details manually.
+                    </p>
+                  </div>
+                </div>
+
+                <div className="forma-failed-detail-row">
+                  <span className="forma-failed-label">Server response:</span>
+                  <span className="forma-failed-code">{extractionError}</span>
+                </div>
+
+                <div className="forma-failed-actions">
+                  <Button
+                    variant="primary"
+                    size="sm"
+                    icon={<ArrowRightIcon size={14} />}
+                    onClick={handleContinueManually}
+                  >
+                    Continue Manually with Claim Form
+                  </Button>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    icon={<SparklesIcon size={14} />}
+                    onClick={handleAnalyzeWithAi}
+                  >
+                    Try Again
+                  </Button>
+                </div>
               </div>
-            ) : (
-              <div className="drafts-list">
-                {savedDrafts.map((d) => {
-                  const isActive = d.draftId === activeDraftId;
-                  const fieldCount = Object.keys(d.values || {}).length;
-                  const isVersionMismatch = d.schemaVersion !== schema.version;
+            )}
+
+            {/* Prompt test chips */}
+            <div className="forma-chips-row">
+              <span className="forma-chips-label">Sample narratives:</span>
+              <div className="forma-chips-list">
+                {SAMPLE_NARRATIVES.map((narrative, idx) => (
+                  <button
+                    key={idx}
+                    type="button"
+                    className="forma-chip-btn"
+                    onClick={() => setIncidentText(narrative)}
+                  >
+                    &ldquo;{narrative.slice(0, 48)}...&rdquo;
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            <div className="forma-actions-bar forma-mt-md">
+              <Button
+                variant="secondary"
+                size="md"
+                onClick={() => setCurrentStage('form')}
+              >
+                Skip to Blank Form
+              </Button>
+              <Button
+                variant="primary"
+                size="md"
+                icon={<SparklesIcon size={16} />}
+                disabled={!incidentText.trim()}
+                onClick={handleAnalyzeWithAi}
+              >
+                Analyze with AI
+              </Button>
+            </div>
+          </div>
+        </Card>
+      )}
+
+      {/* =========================================================================
+          PAGE 4: STAGE 2 — AI ANALYSIS IN PROGRESS
+      ========================================================================= */}
+      {currentStage === 'analyzing' && (
+        <Card className="forma-analyzing-card">
+          <div className="forma-analyzing-wrap">
+            <div className="forma-analyzing-spinner" aria-hidden="true" />
+            <h2 className="forma-analyzing-title">Analyzing your incident</h2>
+            <p className="forma-analyzing-desc">
+              Forma AI is processing your narrative, matching facts against the form schema, and preparing structured values...
+            </p>
+            <div className="forma-analyzing-progress">
+              <div className="forma-progress-bar-indeterminate" />
+            </div>
+          </div>
+        </Card>
+      )}
+
+      {/* =========================================================================
+          PAGE 4: STAGE 2 — AI EXTRACTED INFORMATION REVIEW CARD
+      ========================================================================= */}
+      {currentStage === 'extracted' && rawExtractionResult && (
+        <Card
+          title={
+            <div className="forma-card-title-row">
+              <Badge variant="ai" icon={<SparklesIcon size={13} />}>
+                AI Extracted Information
+              </Badge>
+              <span>Review Extracted Entities</span>
+            </div>
+          }
+          subtitle="Forma AI extracted the following structured data from your description. Review before continuing to the form."
+        >
+          <div className="forma-extraction-grid">
+            {Object.entries(rawExtractionResult).map(([key, val]) => {
+              if (val === undefined || val === null || val === '') return null;
+              // Clean key label
+              const cleanLabel = key
+                .replace(/([A-Z])/g, ' $1')
+                .replace(/^./, (str) => str.toUpperCase());
+              return (
+                <div key={key} className="forma-extraction-item">
+                  <span className="forma-extraction-key">{cleanLabel}</span>
+                  <span className="forma-extraction-val">{String(val)}</span>
+                </div>
+              );
+            })}
+          </div>
+
+          <div className="forma-notice-box forma-mt-md">
+            <span className="forma-notice-icon">
+              <SparklesIcon size={16} color="#0ea5e9" />
+            </span>
+            <div className="forma-notice-text">
+              <strong>Human-in-the-Loop Assurance:</strong> All extracted values will be pre-filled into the form as editable suggestions. You will have full authority to edit, verify, or override any field.
+            </div>
+          </div>
+
+          <div className="forma-actions-bar forma-mt-md">
+            <Button
+              variant="outline"
+              size="md"
+              icon={<ArrowLeftIcon size={16} />}
+              onClick={() => setCurrentStage('describe')}
+            >
+              Edit Description
+            </Button>
+            <Button
+              variant="primary"
+              size="md"
+              icon={<ArrowRightIcon size={16} />}
+              onClick={handleContinueToForm}
+            >
+              Continue to Claim Form
+            </Button>
+          </div>
+        </Card>
+      )}
+
+      {/* =========================================================================
+          PAGE 5: STAGE 3 — DYNAMIC CLAIM FORM
+      ========================================================================= */}
+      {currentStage === 'form' && (
+        <div className="forma-form-layout">
+          {/* Main Column: Dynamic Form Driven by MongoDB Schema */}
+          <div className="forma-form-main">
+            <Card
+              title={
+                <div className="forma-card-title-row">
+                  <FileTextIcon size={18} color="#0ea5e9" />
+                  <span>{schema.title}</span>
+                  {activeDraftId && (
+                    <Badge variant="neutral" size="sm" className="forma-draft-status-pill">
+                      <ClockIcon size={11} />
+                      <span>Draft #{activeDraftId.slice(-6)}</span>
+                    </Badge>
+                  )}
+                </div>
+              }
+              subtitle={schema.description}
+            >
+              <FormProvider {...form}>
+                <form onSubmit={(e) => { e.preventDefault(); void handleProceedToReview(); }} noValidate>
+                  <div className="forma-dynamic-content">
+                    {hasSections ? (
+                      schema.sections!.map((section) => (
+                        <FormSection key={section.id} section={section}>
+                          {section.fields?.map((field) => (
+                            <FieldRenderer key={field.id} field={field} />
+                          ))}
+                        </FormSection>
+                      ))
+                    ) : hasFields ? (
+                      <div className="forma-flat-fields">
+                        {schema.fields!.map((field) => (
+                          <FieldRenderer key={field.id} field={field} />
+                        ))}
+                      </div>
+                    ) : (
+                      <p className="forma-empty-notice">No fields in schema.</p>
+                    )}
+                  </div>
+
+                  {submissionBlockedMessage && (
+                    <ErrorMessage message={submissionBlockedMessage} className="forma-mt-md" />
+                  )}
+
+                  {draftNotice && (
+                    <div className="forma-success-toast forma-mt-sm">
+                      <CheckCircleIcon size={16} color="#10b981" />
+                      <span>{draftNotice}</span>
+                    </div>
+                  )}
+
+                  <div className="forma-actions-bar forma-mt-lg">
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="md"
+                      icon={<ArrowLeftIcon size={16} />}
+                      onClick={() => setCurrentStage('describe')}
+                    >
+                      Back to Narrative
+                    </Button>
+                    <div className="forma-actions-group">
+                      <Button
+                        type="button"
+                        variant="secondary"
+                        size="md"
+                        icon={<ClockIcon size={16} />}
+                        isLoading={isSavingDraft}
+                        onClick={handleSaveDraft}
+                      >
+                        Save Draft
+                      </Button>
+                      <Button
+                        type="submit"
+                        variant="primary"
+                        size="md"
+                        icon={<ArrowRightIcon size={16} />}
+                      >
+                        Proceed to Review
+                      </Button>
+                    </div>
+                  </div>
+                </form>
+              </FormProvider>
+            </Card>
+          </div>
+
+          {/* Secondary Column: AI Assistance & Progress Panel */}
+          <aside className="forma-form-sidebar">
+            {/* AI Assistance Status */}
+            <Card
+              title={
+                <div className="forma-card-title-row">
+                  <SparklesIcon size={16} color="#38bdf8" />
+                  <span>AI Intake Assistance</span>
+                </div>
+              }
+              className="forma-sidebar-card"
+            >
+              <div className="forma-ai-stats">
+                <div className="forma-ai-stat-row">
+                  <span className="forma-stat-label">AI Suggested</span>
+                  <Badge variant="ai" size="sm">
+                    {Object.keys(aiSuggestedFields).length} fields
+                  </Badge>
+                </div>
+                <div className="forma-ai-stat-row">
+                  <span className="forma-stat-label">Reviewed by You</span>
+                  <Badge variant="neutral" size="sm">
+                    {Object.keys(userReviewedFields).length + Object.keys(userModifiedFields).length} fields
+                  </Badge>
+                </div>
+              </div>
+
+              {Object.keys(aiSuggestedFields).length > 0 && (
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="forma-w-full forma-mt-sm"
+                  icon={<CheckIcon size={14} />}
+                  onClick={confirmAllAiSuggestions}
+                >
+                  Confirm All AI Fields
+                </Button>
+              )}
+            </Card>
+
+            {/* Form Readiness Status */}
+            <Card
+              title={
+                <div className="forma-card-title-row">
+                  <CheckCircleIcon
+                    size={16}
+                    color={readiness.status === 'READY' ? '#10b981' : '#f59e0b'}
+                  />
+                  <span>Form Readiness</span>
+                </div>
+              }
+              className="forma-sidebar-card"
+            >
+              <div className="forma-readiness-badge-row">
+                <Badge
+                  variant={
+                    readiness.status === 'READY'
+                      ? 'success'
+                      : readiness.status === 'NEEDS REVIEW'
+                      ? 'danger'
+                      : 'warning'
+                  }
+                >
+                  {readiness.status}
+                </Badge>
+              </div>
+
+              <p className="forma-readiness-summary">{readiness.summaryMessage}</p>
+
+              {readiness.missingRequired.length > 0 && (
+                <div className="forma-missing-fields-box">
+                  <span className="forma-missing-title">Missing Required:</span>
+                  <ul className="forma-missing-list">
+                    {readiness.missingRequired.map((f) => (
+                      <li key={f.id}>{f.label}</li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+            </Card>
+          </aside>
+        </div>
+      )}
+
+      {/* =========================================================================
+          PAGE 6: STAGE 4 — REVIEW & SUBMIT
+      ========================================================================= */}
+      {currentStage === 'review' && (
+        <Card
+          title={
+            <div className="forma-card-title-row">
+              <FileTextIcon size={18} color="#0ea5e9" />
+              <span>Review your claim</span>
+            </div>
+          }
+          subtitle="Every value shown below comes directly from your active form entries. Verify before final submission."
+        >
+          <div className="forma-review-sections">
+            {hasSections ? (
+              <>
+                {schema.sections!.map((section) => {
+                  const sectionActiveFields = activeFields.filter((f) =>
+                    section.fields?.some((sf) => sf.id === f.id)
+                  );
+                  if (sectionActiveFields.length === 0) return null;
+
+                  // Normalize group title for clean logical grouping
+                  let groupHeading = section.title;
+                  if (section.title.toLowerCase().includes('incident')) groupHeading = 'Incident';
+                  else if (section.title.toLowerCase().includes('vehicle')) groupHeading = 'Vehicle';
+                  else if (section.title.toLowerCase().includes('damage')) groupHeading = 'Damage';
 
                   return (
-                    <div
-                      key={d.draftId}
-                      className={`draft-item ${isActive ? 'draft-item-active' : ''}`}
-                    >
-                      <div className="draft-item-info">
-                        <div className="draft-item-title-row">
-                          <code className="draft-id-badge">{d.draftId}</code>
-                          {isActive && <span className="active-tag">Currently Loaded</span>}
-                          {isVersionMismatch && (
-                            <span className="version-mismatch-tag">
-                              v{d.schemaVersion} (current: v{schema.version})
-                            </span>
-                          )}
-                        </div>
-                        <div className="draft-item-meta">
-                          <span>Updated: {new Date(d.updatedAt).toLocaleString()}</span>
-                          <span>&middot;</span>
-                          <span>{fieldCount} field{fieldCount === 1 ? '' : 's'} saved</span>
-                        </div>
-                      </div>
-
-                      <div className="draft-item-actions">
-                        <button
-                          type="button"
-                          className="btn btn-sm btn-primary resume-draft-btn"
-                          onClick={() => void handleResumeDraft(d.draftId)}
-                          disabled={isActive}
-                          title={isActive ? 'This draft is already loaded' : 'Resume editing this draft'}
-                        >
-                          {isActive ? 'Loaded' : 'Resume'}
-                        </button>
-                        <button
-                          type="button"
-                          className="btn btn-sm btn-danger delete-draft-btn"
-                          onClick={() => void handleDeleteDraft(d.draftId)}
-                          title="Delete this draft permanently"
-                        >
-                          Delete
-                        </button>
+                    <div key={section.id} className="forma-review-group">
+                      <h3 className="forma-review-group-title">{groupHeading}</h3>
+                      <div className="forma-review-grid">
+                        {sectionActiveFields.map(renderReviewFieldValue)}
                       </div>
                     </div>
                   );
                 })}
+
+                {/* Additional Details group for any active fields not belonging to the primary sections */}
+                {(() => {
+                  const sectionFieldIds = new Set(
+                    schema.sections?.flatMap((s) => s.fields?.map((f) => f.id) || []) || []
+                  );
+                  const unassignedFields = activeFields.filter((f) => !sectionFieldIds.has(f.id));
+                  if (unassignedFields.length === 0) return null;
+
+                  return (
+                    <div className="forma-review-group">
+                      <h3 className="forma-review-group-title">Additional Details</h3>
+                      <div className="forma-review-grid">
+                        {unassignedFields.map(renderReviewFieldValue)}
+                      </div>
+                    </div>
+                  );
+                })()}
+              </>
+            ) : (
+              <div className="forma-review-grid">
+                {activeFields.map(renderReviewFieldValue)}
               </div>
             )}
-
-            <div className="drafts-panel-footer">
-              <button
-                type="button"
-                className="btn btn-secondary start-fresh-btn"
-                onClick={handleStartFresh}
-              >
-                + Start Blank Form
-              </button>
-            </div>
           </div>
-        </div>
-      )}
 
-      {/* Draft Action Feedback Banner */}
-      {draftFeedback && (
-        <div
-          className={`draft-feedback-banner feedback-${draftFeedback.type}`}
-          role="status"
-          aria-live="polite"
-        >
-          <div style={{ display: 'flex', alignItems: 'center', gap: '0.6rem' }}>
-            <span aria-hidden="true" style={{ fontSize: '1.1rem' }}>
-              {draftFeedback.type === 'success' && '✓'}
-              {draftFeedback.type === 'warning' && '⚠'}
-              {draftFeedback.type === 'error' && '🚫'}
-              {draftFeedback.type === 'info' && 'ℹ️'}
-            </span>
-            <span>{draftFeedback.message}</span>
-          </div>
-          <button
-            type="button"
-            className="feedback-dismiss-btn"
-            onClick={() => setDraftFeedback(null)}
-            aria-label="Dismiss notification"
-          >
-            ✕
-          </button>
-        </div>
-      )}
+          {submissionError && (
+            <ErrorMessage message={submissionError} className="forma-mt-md" />
+          )}
 
-      {/* Currently Active Resumed Draft Indicator */}
-      {activeDraftId && (
-        <div className="active-draft-banner" role="status">
-          <div className="active-draft-details">
-            <span className="active-draft-icon" aria-hidden="true">📄</span>
-            <span>
-              <strong>Editing Draft:</strong> <code>{activeDraftId}</code>
-              {activeDraftUpdatedAt && (
-                <span className="active-draft-time">
-                  &nbsp;&middot;&nbsp;Last saved: {new Date(activeDraftUpdatedAt).toLocaleTimeString()}
-                </span>
-              )}
-            </span>
-          </div>
-          <div className="active-draft-actions">
-            <button
-              type="button"
-              className="active-draft-new-btn"
-              onClick={handleStartFresh}
-              title="Discard draft view and start fresh"
+          <div className="forma-actions-bar forma-mt-lg">
+            <Button
+              variant="outline"
+              size="md"
+              icon={<EditIcon size={16} />}
+              onClick={() => {
+                form.reset(reviewValues);
+                setCurrentStage('form');
+              }}
             >
-              Start Blank Form
-            </button>
-          </div>
-        </div>
-      )}
-
-      {/* Week 2: AI Magic Input Box */}
-      <MagicInput schemaId={schema.schemaId} onExtractSuccess={handleAiAutofill} />
-
-      {/* Week 3: Unified Form Readiness Banner */}
-      <div
-        className={`form-readiness-banner readiness-${formReadiness.status.toLowerCase().replace(/\s+/g, '-')}`}
-        role="region"
-        aria-label="Form validation and submission readiness"
-      >
-        <div className="readiness-main">
-          <div className="readiness-badge-group">
-            <span className="readiness-label">Form Readiness:</span>
-            <span
-              className={`readiness-pill readiness-pill-${formReadiness.status.toLowerCase().replace(/\s+/g, '-')}`}
+              Edit
+            </Button>
+            <Button
+              variant="primary"
+              size="md"
+              icon={<SendIcon size={16} />}
+              isLoading={submissionStatus === 'submitting'}
+              onClick={handleSubmitFinal}
             >
-              {formReadiness.status === 'READY' && '✓ READY'}
-              {formReadiness.status === 'NEEDS REVIEW' && '⚠ NEEDS REVIEW'}
-              {formReadiness.status === 'INCOMPLETE' && '○ INCOMPLETE'}
-            </span>
+              Submit Claim
+            </Button>
           </div>
-          <span className="readiness-message">{formReadiness.summaryMessage}</span>
-        </div>
-        <div className="readiness-principle">
-          AI suggests &middot; Human confirms &middot; System validates
-        </div>
-      </div>
+        </Card>
+      )}
 
-      {/* Human-in-the-Loop Review Banner */}
-      {reviewSummary && (
-        <div className="human-review-banner" role="region" aria-label="AI extraction review summary">
-          <div className="review-banner-header">
-            <div className="review-banner-title">
-              <span className="review-banner-icon" aria-hidden="true">✨</span>
-              <strong>AI Extraction Review:</strong>
-              <span>
-                {reviewSummary.applied.length > 0
-                  ? `AI suggested ${reviewSummary.applied.length} piece${reviewSummary.applied.length === 1 ? '' : 's'} of information.`
-                  : 'No new compatible fields were applied.'}
-              </span>
+      {/* =========================================================================
+          PAGE 7: STAGE 5 — SUBMISSION SUCCESS
+      ========================================================================= */}
+      {currentStage === 'success' && (
+        <Card className="forma-success-card">
+          <div className="forma-success-wrap">
+            <div className="forma-success-icon-ring">
+              <CheckCircleIcon size={36} color="#10b981" />
             </div>
-            <div className="review-banner-actions">
-              {formReadiness.unreviewedAiFields.length > 0 && (
-                <button
-                  type="button"
-                  className="review-btn confirm-all-btn"
-                  onClick={() => {
-                    confirmAllAiSuggestions();
-                    setSubmissionBlockedMessage(null);
-                  }}
-                  title="Confirm all remaining AI suggestions as accurate"
-                >
-                  ✓ Confirm all suggestions
-                </button>
-              )}
-              {activeAiMarkerCount > 0 && (
-                <button
-                  type="button"
-                  className="review-btn review-ai-fields-btn"
-                  onClick={handleReviewAiFields}
-                  title="Jump to the first field populated by AI"
-                >
-                  🔍 Review AI fields
-                </button>
-              )}
-              {activeAiMarkerCount > 0 && (
-                <button
-                  type="button"
-                  className="review-btn clear-markers-btn"
-                  onClick={handleClearMarkers}
-                  title="Clear AI suggestion markers without erasing form values"
-                >
-                  Clear AI markers
-                </button>
-              )}
-              <button
-                type="button"
-                className="review-btn reset-form-btn"
-                onClick={handleResetEntireForm}
+            <h2 className="forma-success-title">Claim submitted</h2>
+            <p className="forma-success-desc">
+              Your insurance claim intake has been successfully validated and recorded by the Forma AI engine.
+            </p>
+
+            <div className="forma-success-details-card">
+              <div className="forma-success-detail-row">
+                <span className="forma-detail-label">Claim Identifier</span>
+                <code className="forma-code-pill forma-text-bold">
+                  {confirmedSubmissionId || 'CLM-CONFIRMED'}
+                </code>
+              </div>
+              <div className="forma-success-detail-row">
+                <span className="forma-detail-label">Schema Applied</span>
+                <span>{schema.title} (v{schema.version})</span>
+              </div>
+              <div className="forma-success-detail-row">
+                <span className="forma-detail-label">Submitted At</span>
+                <span>{new Date().toLocaleString()}</span>
+              </div>
+              <div className="forma-success-detail-row">
+                <span className="forma-detail-label">Fields Captured</span>
+                <span>{finalSubmissionPayload ? Object.keys(finalSubmissionPayload.values).length : 0} fields verified</span>
+              </div>
+            </div>
+
+            <div className="forma-success-actions">
+              <Button
+                variant="primary"
+                size="md"
+                icon={<FolderIcon size={16} />}
+                onClick={onViewAllClaims || onNavigateHome}
               >
-                Reset form
-              </button>
+                View My Claims
+              </Button>
+              <Button
+                variant="secondary"
+                size="md"
+                icon={<SparklesIcon size={16} />}
+                onClick={handleStartAnother}
+              >
+                Start Another Claim
+              </Button>
             </div>
           </div>
-
-          <div className="review-banner-body">
-            {reviewSummary.applied.length > 0 && (
-              <p className="review-instruction">
-                Please review the highlighted fields below. Editing any field will automatically confirm your manual value and remove the AI suggestion marker.
-              </p>
-            )}
-
-            {/* List applied suggestions */}
-            {reviewSummary.applied.length > 0 && (
-              <div className="review-chip-list">
-                {reviewSummary.applied.map((item) => (
-                  <span key={item.fieldName} className="review-chip applied">
-                    {item.fieldLabel}: <strong>{String(item.value)}</strong>
-                  </span>
-                ))}
-              </div>
-            )}
-
-            {/* Notice for active validation errors */}
-            {formReadiness.activeErrors.length > 0 && (
-              <div className="review-errors-notice" role="alert">
-                <span className="errors-icon">⚠️</span>
-                <div>
-                  <strong>
-                    {formReadiness.activeErrors.length} field{formReadiness.activeErrors.length === 1 ? '' : 's'} require{formReadiness.activeErrors.length === 1 ? 's' : ''} your review:
-                  </strong>
-                  <ul className="invalid-details-list" style={{ marginTop: '0.25rem' }}>
-                    {formReadiness.activeErrors.map((err) => (
-                      <li key={err.fieldName}>
-                        <strong>{err.fieldName}:</strong> {err.message}
-                      </li>
-                    ))}
-                  </ul>
-                </div>
-              </div>
-            )}
-
-            {/* Notice for missing required fields */}
-            {missingRequiredFields.length > 0 && (
-              <div className="review-missing-notice" role="status">
-                <span className="missing-icon">&#9432;</span>
-                <div>
-                  <strong>
-                    {missingRequiredFields.length} required field{missingRequiredFields.length === 1 ? '' : 's'} still need{missingRequiredFields.length === 1 ? 's' : ''} your attention:
-                  </strong>{' '}
-                  <span style={{ color: '#b45309', fontWeight: 600 }}>
-                    {missingRequiredFields.map((f) => f.label).join(', ')}
-                  </span>
-                  <p style={{ margin: '0.2rem 0 0 0', fontSize: '0.8rem', color: '#92400e' }}>
-                    Missing information is normal in unstructured text. Please complete these fields before submitting.
-                  </p>
-                </div>
-              </div>
-            )}
-
-            {/* List preserved user manual edits */}
-            {reviewSummary.preserved.length > 0 && (
-              <div className="review-preserved-notice">
-                <span className="preserved-icon">&#128274;</span>
-                <span>
-                  <strong>{reviewSummary.preserved.length} field{reviewSummary.preserved.length === 1 ? '' : 's'} preserved:</strong> Your manual edits were kept over incoming suggestions ({reviewSummary.preserved.map((p) => p.fieldLabel).join(', ')}).
-                </span>
-              </div>
-            )}
-
-            {/* List rejected/incompatible fields if any */}
-            {reviewSummary.invalid.length > 0 && (
-              <div className="review-invalid-notice">
-                <span className="invalid-icon">&#9888;</span>
-                <div>
-                  <strong>{reviewSummary.invalid.length} value{reviewSummary.invalid.length === 1 ? '' : 's'} could not be safely matched to the form:</strong>
-                  <ul className="invalid-details-list">
-                    {reviewSummary.invalid.map((item) => (
-                      <li key={item.fieldName}>
-                        {item.fieldLabel}: {item.reason}
-                      </li>
-                    ))}
-                  </ul>
-                </div>
-              </div>
-            )}
-          </div>
-        </div>
-      )}
-
-      {/* Submission Guard Alert */}
-      {submissionBlockedMessage && (
-        <div className="submission-guard-alert" role="alert">
-          <span style={{ fontSize: '1.25rem' }} aria-hidden="true">🚫</span>
-          <div>
-            <strong>Cannot Submit Form</strong>
-            <p style={{ margin: '0.25rem 0 0 0', fontSize: '0.875rem' }}>{submissionBlockedMessage}</p>
-          </div>
-        </div>
-      )}
-
-      {/* Submission Error Alert */}
-      {submissionError && (
-        <div className="submission-guard-alert submission-error-alert" role="alert">
-          <span style={{ fontSize: '1.25rem' }} aria-hidden="true">⚠️</span>
-          <div>
-            <strong>Submission Failed</strong>
-            <p style={{ margin: '0.25rem 0 0 0', fontSize: '0.875rem' }}>{submissionError}</p>
-          </div>
-        </div>
-      )}
-
-      {/* Dynamic Form Master Coordinator */}
-      <DynamicForm
-        schema={schema}
-        form={form}
-        onSubmit={handleFormSubmit}
-        onSaveDraft={handleSaveDraft}
-        isSavingDraft={isSavingDraft}
-        reviewSummaryNode={reviewSummaryNode}
-      />
-
-      {/* Submission Success & Verified Contract Preview Card */}
-      {submissionStatus === 'success' && finalSubmissionPayload && (
-        <div
-          className="submission-preview-card"
-          role="status"
-          aria-live="polite"
-          style={{
-            marginTop: '1.5rem',
-            padding: '1.25rem',
-            backgroundColor: '#f0fdf4',
-            border: '1.5px solid #86efac',
-            borderRadius: '8px',
-          }}
-        >
-          <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem', marginBottom: '0.5rem' }}>
-            <span style={{ fontSize: '1.25rem', color: '#16a34a' }}>✓</span>
-            <h3 style={{ color: '#166534', fontSize: '1.1rem', margin: 0 }}>
-              Claim Form Successfully Submitted
-            </h3>
-          </div>
-          <p style={{ fontSize: '0.85rem', color: '#15803d', margin: '0 0 0.75rem 0' }}>
-            Submission contract verified. Clean payload captured and ready for persistence:
-          </p>
-          <div style={{ display: 'flex', gap: '1rem', flexWrap: 'wrap', marginBottom: '0.75rem', fontSize: '0.8rem', color: '#166534' }}>
-            <span><strong>Schema ID:</strong> {finalSubmissionPayload.schemaId}</span>
-            <span><strong>Version:</strong> {finalSubmissionPayload.schemaVersion}</span>
-            <span><strong>Submitted At:</strong> {finalSubmissionPayload.submittedAt}</span>
-            <span><strong>Active Fields Count:</strong> {Object.keys(finalSubmissionPayload.values).length}</span>
-          </div>
-          <pre
-            style={{
-              background: '#ffffff',
-              padding: '0.75rem',
-              borderRadius: '6px',
-              border: '1px solid #dcfce7',
-              fontSize: '0.8rem',
-              overflowX: 'auto',
-              maxHeight: '260px',
-            }}
-          >
-            {JSON.stringify(finalSubmissionPayload, null, 2)}
-          </pre>
-        </div>
+        </Card>
       )}
     </div>
   );

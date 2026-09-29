@@ -23,6 +23,8 @@ export interface FormSubmissionPayload {
   formId?: string;
   formVersion?: number;
   data?: FormValues;
+  submissionId?: string;
+  draftId?: string;
 }
 
 export type SubmissionStatus = 'idle' | 'submitting' | 'success' | 'error';
@@ -32,6 +34,7 @@ export interface SubmissionResult {
   message?: string;
   payload?: FormSubmissionPayload;
   error?: string;
+  submissionId?: string;
 }
 
 export interface FormState {

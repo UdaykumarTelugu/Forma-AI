@@ -10,6 +10,7 @@ import { TextareaField } from '../fields/TextareaField';
 import { ConditionalField } from './ConditionalField';
 import { useAiSuggestionStore } from '../../stores/aiSuggestionStore';
 import { buildFieldValidationRules, validateField } from '../../utils/validation';
+import { SparklesIcon, CheckIcon, EditIcon, AlertCircleIcon } from '../common/Icons';
 
 export interface FieldRendererProps {
   field: FormField;
@@ -173,8 +174,8 @@ export const FieldRenderer: React.FC<FieldRendererProps> = ({
                       role="status"
                       aria-label={`${field.label}: Suggested by AI`}
                     >
-                      <span className="ai-indicator-icon" aria-hidden="true">✨</span>
-                      <span className="ai-indicator-text">Suggested by AI</span>
+                      <SparklesIcon size={12} color="#38bdf8" />
+                      <span className="ai-indicator-text">AI suggested</span>
                       <button
                         type="button"
                         className="ai-confirm-btn"
@@ -182,7 +183,8 @@ export const FieldRenderer: React.FC<FieldRendererProps> = ({
                         title={`Confirm suggestion for ${field.label} without changes`}
                         aria-label={`Confirm suggestion for ${field.label}`}
                       >
-                        ✓ Confirm
+                        <CheckIcon size={11} color="currentColor" />
+                        <span>Confirm</span>
                       </button>
                     </div>
                   )}
@@ -192,8 +194,8 @@ export const FieldRenderer: React.FC<FieldRendererProps> = ({
                       role="status"
                       aria-label={`${field.label}: Suggested by AI, needs review`}
                     >
-                      <span className="ai-indicator-icon" aria-hidden="true">⚠️</span>
-                      <span className="ai-indicator-text">Suggested by AI • Needs Review</span>
+                      <AlertCircleIcon size={12} color="#fbbf24" />
+                      <span className="ai-indicator-text">AI suggested &bull; Needs review</span>
                     </div>
                   )}
                   {status === 'user-reviewed' && (
@@ -202,7 +204,7 @@ export const FieldRenderer: React.FC<FieldRendererProps> = ({
                       role="status"
                       aria-label={`${field.label}: Reviewed and edited by you`}
                     >
-                      <span className="ai-indicator-icon" aria-hidden="true">✏️</span>
+                      <EditIcon size={11} color="#34d399" />
                       <span className="ai-indicator-text">Reviewed by you</span>
                     </div>
                   )}

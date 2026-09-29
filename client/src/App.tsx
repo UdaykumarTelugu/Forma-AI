@@ -1,22 +1,99 @@
 import React, { useState } from 'react';
-import { HomePage } from './pages/HomePage';
+import { AppLayout, AppPage } from './components/layout/AppLayout';
+import { LoginPage } from './pages/LoginPage';
+import { DashboardPage } from './pages/DashboardPage';
 import { ClaimFormPage } from './pages/ClaimFormPage';
+import { MyClaimsPage } from './pages/MyClaimsPage';
+import { ClaimDetailsPage } from './pages/ClaimDetailsPage';
+import { ProfilePage } from './pages/ProfilePage';
+import { SettingsPage } from './pages/SettingsPage';
 import './index.css';
 
 export const App: React.FC = () => {
-  const [currentPage, setCurrentPage] = useState<'home' | 'claim'>('home');
+  const [isAuthenticated, setIsAuthenticated] = useState<boolean>(true);
+  const [currentPage, setCurrentPage] = useState<AppPage>('dashboard');
+  const [currentDraftId, setCurrentDraftId] = useState<string | null>(null);
+  const [selectedClaimId, setSelectedClaimId] = useState<string | null>(null);
 
-  // TODO: Add client-side router (e.g. React Router) when multiple routes are configured
+  if (!isAuthenticated) {
+    return (
+      <LoginPage
+        onLogin={() => {
+          setIsAuthenticated(true);
+          setCurrentPage('dashboard');
+        }}
+      />
+    );
+  }
+
+  const handleStartNewClaim = () => {
+    setCurrentDraftId(null);
+    setCurrentPage('new-claim');
+  };
+
+  const handleResumeDraft = (draftId: string) => {
+    setCurrentDraftId(draftId);
+    setCurrentPage('new-claim');
+  };
+
+  const handleViewClaimDetails = (claimId: string) => {
+    setSelectedClaimId(claimId);
+    setCurrentPage('claim-details');
+  };
+
+  const handleLogout = () => {
+    setIsAuthenticated(false);
+  };
+
   return (
-    <div className="app-container">
-      <nav style={{ padding: '1rem', borderBottom: '1px solid #e2e8f0', display: 'flex', gap: '1rem' }}>
-        <button type="button" onClick={() => setCurrentPage('home')}>Home</button>
-        <button type="button" onClick={() => setCurrentPage('claim')}>Claim Form</button>
-      </nav>
-      <main style={{ padding: '1.5rem' }}>
-        {currentPage === 'home' ? <HomePage /> : <ClaimFormPage />}
-      </main>
-    </div>
+    <AppLayout
+      activePage={currentPage}
+      onNavigate={(page) => {
+        if (page === 'new-claim' && currentPage !== 'new-claim') {
+          setCurrentDraftId(null);
+        }
+        setCurrentPage(page);
+      }}
+      onLogout={handleLogout}
+    >
+      {currentPage === 'dashboard' && (
+        <DashboardPage
+          onStartNewClaim={handleStartNewClaim}
+          onResumeDraft={handleResumeDraft}
+          onViewAllClaims={() => setCurrentPage('my-claims')}
+          onViewClaimDetails={handleViewClaimDetails}
+        />
+      )}
+
+      {currentPage === 'new-claim' && (
+        <ClaimFormPage
+          key={currentDraftId || 'new'}
+          initialDraftId={currentDraftId}
+          onNavigateHome={() => setCurrentPage('dashboard')}
+          onViewAllClaims={() => setCurrentPage('my-claims')}
+          onViewClaimDetails={handleViewClaimDetails}
+        />
+      )}
+
+      {currentPage === 'my-claims' && (
+        <MyClaimsPage
+          onStartNewClaim={handleStartNewClaim}
+          onResumeDraft={handleResumeDraft}
+          onViewClaimDetails={handleViewClaimDetails}
+        />
+      )}
+
+      {currentPage === 'claim-details' && (
+        <ClaimDetailsPage
+          claimId={selectedClaimId || ''}
+          onBack={() => setCurrentPage('my-claims')}
+        />
+      )}
+
+      {currentPage === 'profile' && <ProfilePage />}
+
+      {currentPage === 'settings' && <SettingsPage />}
+    </AppLayout>
   );
 };
 

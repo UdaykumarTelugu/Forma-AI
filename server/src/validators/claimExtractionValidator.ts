@@ -24,63 +24,87 @@ export type ExtractClaimRequestInput = z.infer<typeof extractClaimRequestSchema>
 /**
  * Canonical fallback Zod schema for auto-insurance claim extraction.
  * Dynamic schemas generated via extractionSchemaService take precedence for schema-driven extraction.
+ *
+ * OpenAI Structured Outputs requires every object property to be required.
+ * Nullable fields allow the model to explicitly return null when information
+ * is not present in the user's claim description.
  */
 export const claimExtractionSchema = z.object({
   incidentType: z
     .enum(['animal_collision', 'accident', 'theft', 'weather_damage', 'other'], {
       description: 'The category of incident that occurred',
     })
-    .optional(),
+    .nullable(),
+
   incidentDate: z
     .string({
-      description: 'The date or timeframe when the incident occurred, formatted as YYYY-MM-DD if determinable',
+      description:
+        'The date or timeframe when the incident occurred, formatted as YYYY-MM-DD if determinable',
     })
-    .optional(),
+    .nullable(),
+
   incidentDescription: z
     .string({
-      description: 'A concise summary of the incident circumstances directly stated by the user',
+      description:
+        'A concise summary of the incident circumstances directly stated by the user',
     })
-    .optional(),
+    .nullable(),
+
   animalSpecies: z
     .enum(['deer', 'elk_moose', 'bear', 'domestic', 'other'], {
       description: 'The species of animal involved in an animal collision',
     })
-    .optional(),
+    .nullable(),
+
   animalDamageConfirmed: z
     .enum(['yes', 'no'], {
-      description: 'Whether physical biological evidence was confirmed on the vehicle',
+      description:
+        'Whether physical biological evidence was confirmed on the vehicle',
     })
-    .optional(),
+    .nullable(),
+
   wildlifeReportNumber: z
     .string({
-      description: 'Agency or DNR wildlife incident report number if explicitly provided',
+      description:
+        'Agency or DNR wildlife incident report number if explicitly provided',
     })
-    .optional(),
+    .nullable(),
+
   otherVehicleInvolved: z
     .boolean({
-      description: 'True if another motor vehicle was involved in a collision',
+      description:
+        'True if another motor vehicle was involved in a collision',
     })
-    .optional(),
+    .nullable(),
+
   otherVehicleMake: z
     .string({
-      description: 'The manufacturer/make of the other vehicle involved (e.g. Toyota, Chevrolet)',
+      description:
+        'The manufacturer/make of the other vehicle involved (e.g. Toyota, Chevrolet)',
     })
-    .optional(),
+    .nullable(),
+
   otherVehicleModel: z
     .string({
-      description: 'The model of the other vehicle involved (e.g. Camry, Silverado)',
+      description:
+        'The model of the other vehicle involved (e.g. Camry, Silverado)',
     })
-    .optional(),
+    .nullable(),
+
   vehicleMake: z
     .string({
-      description: 'The manufacturer/make of the insured vehicle (e.g. Honda, Ford, BMW)',
+      description:
+        'The manufacturer/make of the insured vehicle (e.g. Honda, Ford, BMW)',
     })
-    .optional(),
+    .nullable(),
+
   vehicleModel: z
     .string({
-      description: 'The model name of the insured vehicle (e.g. Civic, Accord, F-150)',
+      description:
+        'The model name of the insured vehicle (e.g. Civic, Accord, F-150)',
     })
-    .optional(),
+    .nullable(),
+
   vehicleYear: z
     .number({
       description: 'The 4-digit model year of the vehicle (e.g. 2022)',
@@ -88,17 +112,20 @@ export const claimExtractionSchema = z.object({
     .int()
     .min(1900)
     .max(2030)
-    .optional(),
+    .nullable(),
+
   damageType: z
     .enum(['windshield', 'body', 'engine', 'tires', 'multiple', 'other'], {
       description: 'Primary physical damage category on the vehicle',
     })
-    .optional(),
+    .nullable(),
+
   damageDescription: z
     .string({
-      description: 'Specific physical damages explicitly detailed in the text (e.g. shattered glass, dented bumper)',
+      description:
+        'Specific physical damages explicitly detailed in the text (e.g. shattered glass, dented bumper)',
     })
-    .optional(),
+    .nullable(),
 });
 
 export type ValidatedClaimExtraction = z.infer<typeof claimExtractionSchema>;
